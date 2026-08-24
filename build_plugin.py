@@ -59,7 +59,7 @@ def build_plugin(project_dir: Path, output_path: Path) -> Path:
     with ZipFile(output_path, "w", compression=ZIP_DEFLATED, compresslevel=9) as archive:
         for name in PLUGIN_FILES:
             archive.write(project_dir / name, arcname=name)
-    print(f"已生成 {manifest['name']} {manifest['version']}: {output_path}")
+    print(f"Built {manifest['name']} {manifest['version']}: {output_path}")
     return output_path
 
 
