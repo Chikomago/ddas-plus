@@ -242,6 +242,14 @@ class TaskArchitectureTests(unittest.TestCase):
         self.assertIn(f'APP_VERSION = "{manifest["version"]}"', source)
         self.assertIn('self.root.title(f"DDAS PLUS v{APP_VERSION}")', source)
 
+    def test_workflow_builds_both_macos_architectures(self):
+        project = Path(__file__).resolve().parent.parent
+        workflow = (project / ".github/workflows/build.yml").read_text(encoding="utf-8")
+        self.assertIn("os: macos-15\n            name: macOS Apple Silicon", workflow)
+        self.assertIn("os: macos-15-intel\n            name: macOS Intel", workflow)
+        self.assertIn("DDAS-PLUS-macOS-Apple-Silicon.zip", workflow)
+        self.assertIn("DDAS-PLUS-macOS-Intel.zip", workflow)
+
     def test_shared_task_stop_lifecycle(self):
         runner = TaskRunner()
         stopped = threading.Event()

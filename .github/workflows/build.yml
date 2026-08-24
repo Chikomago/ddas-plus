@@ -38,10 +38,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
-            name: macOS
+          - os: macos-15
+            name: macOS Apple Silicon
+            artifact: ddas-plus-macos-arm64
+            output: DDAS-PLUS-macOS-Apple-Silicon.zip
+          - os: macos-15-intel
+            name: macOS Intel
+            artifact: ddas-plus-macos-intel
+            output: DDAS-PLUS-macOS-Intel.zip
           - os: windows-latest
             name: Windows
+            artifact: ddas-plus-windows
+            output: dist/DDAS-PLUS.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -60,7 +68,7 @@ jobs:
           --name DDAS-PLUS --icon icon.icns --collect-all DrissionPage main.py
       - name: Package macOS application
         if: runner.os == 'macOS'
-        run: ditto -c -k --sequesterRsrc --keepParent dist/DDAS-PLUS.app DDAS-PLUS-macOS.zip
+        run: ditto -c -k --sequesterRsrc --keepParent dist/DDAS-PLUS.app ${{ matrix.output }}
       - name: Build Windows application
         if: runner.os == 'Windows'
         shell: pwsh
@@ -68,15 +76,9 @@ jobs:
           pyinstaller --noconfirm --clean --onefile --windowed
           --name DDAS-PLUS --icon icon.ico --collect-all DrissionPage main.py
       - uses: actions/upload-artifact@v4
-        if: runner.os == 'macOS'
         with:
-          name: ddas-plus-macos
-          path: DDAS-PLUS-macOS.zip
-      - uses: actions/upload-artifact@v4
-        if: runner.os == 'Windows'
-        with:
-          name: ddas-plus-windows
-          path: dist/DDAS-PLUS.exe
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.output }}
 
   release:
     name: Publish GitHub release
