@@ -297,10 +297,12 @@ class GUI:
             # 字段编码和按钮框架
             input_frame = tk.Frame(field_frame, background='#ECECEC')
             input_frame.pack(fill=tk.X)
+            input_frame.grid_columnconfigure(2, weight=1, uniform='field_action')
+            input_frame.grid_columnconfigure(3, weight=1, uniform='field_action')
 
             # 字段编码输入
             code_frame = tk.Frame(input_frame, background='#ECECEC')
-            code_frame.pack(side=tk.LEFT, padx=2)
+            code_frame.grid(row=0, column=0, sticky='w', padx=(2, 3))
 
             tk.Label(
                 code_frame,
@@ -321,7 +323,7 @@ class GUI:
                 text="✗",
                 foreground='red', background='#ECECEC'
             )
-            file_status_label.pack(side=tk.LEFT, padx=2)
+            file_status_label.grid(row=0, column=1, padx=2)
 
             # 保存行信息
             row_info = {
@@ -357,7 +359,7 @@ class GUI:
                 width=8,
                 style='Batch.Small.TButton'
             )
-            file_btn.pack(side=tk.LEFT, padx=2)
+            file_btn.grid(row=0, column=2, sticky='ew', padx=2)
 
             # 创建文件操作菜单
             file_menu = tk.Menu(input_frame, tearoff=0)
@@ -388,7 +390,7 @@ class GUI:
                 width=8,
                 style='Batch.Small.TButton'
             )
-            edit_btn.pack(side=tk.LEFT, padx=2)
+            edit_btn.grid(row=0, column=3, sticky='ew', padx=2)
 
             # 创建编辑菜单
             edit_menu = tk.Menu(input_frame, tearoff=0)
@@ -411,34 +413,20 @@ class GUI:
             checkbox_frame = tk.Frame(field_frame, background='#ECECEC')
             checkbox_frame.pack(fill=tk.X, pady=5)
 
-            # 复选框
-            tk.Checkbutton(
-                checkbox_frame,
-                        text="上传PC图",
-                        variable=row_info['pc_pic_var'],
-                background='#ECECEC', activebackground='#ECECEC', highlightthickness=0
-            ).pack(side=tk.LEFT, padx=5)
-
-            tk.Checkbutton(
-                checkbox_frame,
-                        text="填PC选项值",
-                        variable=row_info['pc_opt_var'],
-                background='#ECECEC', activebackground='#ECECEC', highlightthickness=0
-            ).pack(side=tk.LEFT, padx=5)
-
-            tk.Checkbutton(
-                checkbox_frame,
-                        text="上传移动图",
-                        variable=row_info['mobile_pic_var'],
-                background='#ECECEC', activebackground='#ECECEC', highlightthickness=0
-            ).pack(side=tk.LEFT, padx=5)
-
-            tk.Checkbutton(
-                checkbox_frame,
-                        text="填移动选项值",
-                        variable=row_info['mobile_opt_var'],
-                background='#ECECEC', activebackground='#ECECEC', highlightthickness=0
-            ).pack(side=tk.LEFT, padx=5)
+            checkbox_items = (
+                ("上传PC图", row_info['pc_pic_var']),
+                ("填PC选项值", row_info['pc_opt_var']),
+                ("上传移动图", row_info['mobile_pic_var']),
+                ("填移动选项值", row_info['mobile_opt_var']),
+            )
+            for column, (text, variable) in enumerate(checkbox_items):
+                checkbox_frame.grid_columnconfigure(column, weight=1, uniform='field_option')
+                tk.Checkbutton(
+                    checkbox_frame,
+                    text=text,
+                    variable=variable,
+                    background='#ECECEC', activebackground='#ECECEC', highlightthickness=0,
+                ).grid(row=0, column=column, sticky='w', padx=5)
 
             # 添加/删除按钮
             if is_first:
@@ -449,7 +437,7 @@ class GUI:
                     command=lambda: self.add_batch_field_row(),
                     style='Batch.Small.TButton'
                 )
-                add_btn.pack(side=tk.LEFT, padx=2)
+                add_btn.grid(row=0, column=4, sticky='e', padx=(2, 0))
             else:
                 del_btn = ttk.Button(
                     input_frame,
@@ -462,7 +450,7 @@ class GUI:
                     ),
                     style='Batch.Small.TButton'
                 )
-                del_btn.pack(side=tk.LEFT, padx=2)
+                del_btn.grid(row=0, column=4, sticky='e', padx=(2, 0))
 
             # 添加分割线
             ttk.Separator(field_frame, orient='horizontal').pack(fill=tk.X, pady=5)

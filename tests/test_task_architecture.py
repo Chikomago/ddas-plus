@@ -1,4 +1,5 @@
 import ast
+import json
 import threading
 import time
 import tempfile
@@ -223,6 +224,23 @@ class TaskArchitectureTests(unittest.TestCase):
             self.assertIn("borderwidth=1", source)
             self.assertIn("relief=tk.SOLID", source)
             self.assertNotIn("White.TLabelframe", source)
+
+    def test_windows_field_row_stretches_to_both_edges(self):
+        project = Path(__file__).resolve().parent.parent
+        source = (project / "deedraw/view.py").read_text(encoding="utf-8")
+        self.assertIn("input_frame.grid_columnconfigure(2, weight=1", source)
+        self.assertIn("input_frame.grid_columnconfigure(3, weight=1", source)
+        self.assertIn("file_btn.grid(row=0, column=2, sticky='ew'", source)
+        self.assertIn("edit_btn.grid(row=0, column=3, sticky='ew'", source)
+        self.assertIn("add_btn.grid(row=0, column=4, sticky='e'", source)
+        self.assertNotIn("file_btn.pack", source)
+
+    def test_window_title_version_matches_manifest(self):
+        project = Path(__file__).resolve().parent.parent
+        manifest = json.loads((project / "plugin.json").read_text(encoding="utf-8"))
+        source = (project / "main.py").read_text(encoding="utf-8")
+        self.assertIn(f'APP_VERSION = "{manifest["version"]}"', source)
+        self.assertIn('self.root.title(f"DDAS PLUS v{APP_VERSION}")', source)
 
     def test_shared_task_stop_lifecycle(self):
         runner = TaskRunner()

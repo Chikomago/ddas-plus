@@ -11,6 +11,8 @@ from common.unified_settings import UnifiedSettingsDialog
 from deedraw.view import GUI
 from pim.view import PimScriptGUI
 
+APP_VERSION = "1.3.9"
+
 
 class UnifiedApp:
     """Single-window DDAS PLUS shell for Deedraw and PIM."""
@@ -22,7 +24,7 @@ class UnifiedApp:
     def __init__(self, root):
         self.root = root
         self.current_page = None
-        self.root.title("DDAS PLUS")
+        self.root.title(f"DDAS PLUS v{APP_VERSION}")
         self.root.geometry(self.WINDOW_SIZE)
         self.root.minsize(self.WINDOW_WIDTH, self.WINDOW_HEIGHT)
         self.root.maxsize(self.WINDOW_WIDTH, self.WINDOW_HEIGHT)
@@ -36,7 +38,7 @@ class UnifiedApp:
         self.logger = TextHandler(self.log_text, self.settings.settings)
         self.log_file = self.logger.setup_logging()
         self.show_home()
-        logging.info("DDAS PLUS 已启动，日志文件: %s", self.log_file)
+        logging.info("DDAS PLUS v%s 已启动，日志文件: %s", APP_VERSION, self.log_file)
 
     def _configure_styles(self):
         style = ttk.Style()
