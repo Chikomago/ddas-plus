@@ -228,6 +228,7 @@ class TaskArchitectureTests(unittest.TestCase):
     def test_windows_field_row_stretches_to_both_edges(self):
         project = Path(__file__).resolve().parent.parent
         source = (project / "deedraw/view.py").read_text(encoding="utf-8")
+        self.assertIn("height=210", source)
         self.assertIn("input_frame.grid_columnconfigure(2, weight=1", source)
         self.assertIn("input_frame.grid_columnconfigure(3, weight=1", source)
         self.assertIn("file_btn.grid(row=0, column=2, sticky='ew'", source)

@@ -11,7 +11,7 @@ from common.unified_settings import UnifiedSettingsDialog
 from deedraw.view import GUI
 from pim.view import PimScriptGUI
 
-APP_VERSION = "1.3.10"
+APP_VERSION = "1.3.11"
 
 
 class UnifiedApp:

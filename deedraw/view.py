@@ -143,6 +143,7 @@ class GUI:
         self.batch_canvas = tk.Canvas(
             fields_frame,
             background="#ECECEC",
+            height=210,
             highlightthickness=0,
             borderwidth=0,
         )
