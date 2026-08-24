@@ -1,0 +1,22 @@
+# Environments
+.venv/
+.venv_arm64/
+.venv_x86_64/
+__pycache__/
+.idea/
+
+# Builds
+build/
+dist/
+*.spec
+*.sh
+# Configuration files
+settings.json
+settings.txt
+
+# Logs and Results
+logs/
+results/
+*.log
+*.xlsx
+.DS_Store

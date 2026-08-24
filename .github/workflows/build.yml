@@ -1,0 +1,96 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  plugin:
+    name: Test and package Sanka plugin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run tests
+        run: python -m unittest discover -s tests
+      - name: Package plugin
+        run: python build_plugin.py --output ddas-plus-plugin.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ddas-plus-plugin
+          path: ddas-plus-plugin.zip
+
+  desktop:
+    name: Build ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            name: macOS
+          - os: windows-latest
+            name: Windows
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt -r requirements-build.txt
+      - name: Run tests
+        run: python -m unittest discover -s tests
+      - name: Build macOS application
+        if: runner.os == 'macOS'
+        run: >-
+          pyinstaller --noconfirm --clean --onefile --windowed
+          --name DDAS-PLUS --icon icon.icns --collect-all DrissionPage main.py
+      - name: Package macOS application
+        if: runner.os == 'macOS'
+        run: ditto -c -k --sequesterRsrc --keepParent dist/DDAS-PLUS.app DDAS-PLUS-macOS.zip
+      - name: Build Windows application
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: >-
+          pyinstaller --noconfirm --clean --onefile --windowed
+          --name DDAS-PLUS --icon icon.ico --collect-all DrissionPage main.py
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'macOS'
+        with:
+          name: ddas-plus-macos
+          path: DDAS-PLUS-macOS.zip
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: ddas-plus-windows
+          path: dist/DDAS-PLUS.exe
+
+  release:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [plugin, desktop]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ddas-plus-*
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            *.zip
+            *.exe
