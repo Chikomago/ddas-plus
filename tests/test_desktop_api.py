@@ -18,7 +18,7 @@ class DesktopAPITests(unittest.TestCase):
         from io import BytesIO
         from unittest.mock import patch
 
-        for tag, available in (('v2.0.9', False), ('v2.0.10', False), ('v2.0.11', True)):
+        for tag, available in (('v2.0.10', False), ('v2.0.11', False), ('v2.0.12', True)):
             with self.subTest(tag=tag), patch('common.desktop_api.urlopen',
                     return_value=BytesIO(json.dumps({'tag_name': tag}).encode())) as read:
                 self.assertEqual(self.api.check_update()['value'], {'tag': tag, 'available': available})
@@ -438,7 +438,7 @@ class DesktopAPITests(unittest.TestCase):
         import webview
         self.assertEqual(self.api.window.create_file_dialog.call_args.args[0], webview.FileDialog.SAVE)
         self.assertEqual(Path(path).name, '自选日志.txt')
-        self.assertIn('图片上传超时', Path(path).read_text())
+        self.assertIn('图片上传超时', Path(path).read_text(encoding='utf-8'))
         self.api.clear_log()
         self.assertEqual(list(self.api._log_text), [])
 
@@ -467,7 +467,7 @@ class DesktopEntryTests(unittest.TestCase):
             close_event = create.return_value.events.closing
             main.main()
             self.assertIs(create.call_args.kwargs['js_api'], factory.return_value._bridge.return_value)
-            self.assertTrue(str(create.call_args.args[1]).endswith('frontend/dist/index.html'))
+            self.assertTrue(Path(create.call_args.args[1]).parts[-3:] == ('frontend', 'dist', 'index.html'))
             self.assertIs(factory.return_value.window, create.return_value)
             close_event.__iadd__.assert_called_once_with(factory.return_value.on_closing)
             self.assertFalse(create.call_args.kwargs['frameless'])

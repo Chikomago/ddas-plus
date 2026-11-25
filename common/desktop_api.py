@@ -30,7 +30,7 @@ from common.task_models import DeedrawFieldRequest, DeedrawTaskRequest, PimTaskR
 from common.task_runner import TaskRunner
 
 
-APP_VERSION = "2.0.10"
+APP_VERSION = "2.0.11"
 RELEASES_URL = "https://github.com/Chikomago/ddas-plus/releases"
 LATEST_RELEASE_API = "https://api.github.com/repos/Chikomago/ddas-plus/releases/latest"
 

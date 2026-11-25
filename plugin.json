@@ -2,7 +2,7 @@
   "id": "ddas-plus",
   "name": "DDAS PLUS",
   "description": "整合深绘与 PIM CAS 自动化，并共用配置文件编辑能力",
-  "version": "2.0.10",
+  "version": "2.0.11",
   "author": "梅雨",
   "category": "效率工具",
   "runtime": [

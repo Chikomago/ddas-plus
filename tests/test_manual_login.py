@@ -54,7 +54,7 @@ class ManualLoginTests(unittest.TestCase):
         self.assertNotIn('username',DeedrawTaskRequest.__dataclass_fields__)
         self.assertNotIn('password',DeedrawTaskRequest.__dataclass_fields__)
         root=Path(__file__).resolve().parent.parent
-        source=(root/'frontend/src/main.jsx').read_text()
+        source=(root/'frontend/src/main.jsx').read_text(encoding='utf-8')
         for text in ['type="password"','save_credentials','load_credentials','setPassword']:
             self.assertNotIn(text,source)
 

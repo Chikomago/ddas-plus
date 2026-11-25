@@ -10,7 +10,6 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 PLUGIN_FILES = (
     "plugin.json",
-    "README.md",
     "requirements.txt",
     "main.py",
     "main_tk.py",

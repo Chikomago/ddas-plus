@@ -2,6 +2,11 @@
 // Keep the first entry's version in sync with plugin.json / APP_VERSION.
 export const CHANGELOG = [
   {
+    title: 'v2.0.11',
+    version: '2.0.11',
+    items: ['修复 Windows 构建测试的编码和路径兼容问题'],
+  },
+  {
     title: 'v2.0.10',
     version: '2.0.10',
     items: [

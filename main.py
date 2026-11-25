@@ -3,7 +3,7 @@ import logging
 import sys
 from pathlib import Path
 
-APP_VERSION = "2.0.10"
+APP_VERSION = "2.0.11"
 
 
 def main():
