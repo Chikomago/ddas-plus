@@ -13,7 +13,6 @@ from pim.task import PimTask
 from common.task_results import TaskReport, format_task_report
 from common.task_runner import TaskRunner
 from common.log_policy import is_diagnostic_message
-from common.result_exporter import export_task_results
 
 
 class TaskArchitectureTests(unittest.TestCase):
@@ -36,7 +35,8 @@ class TaskArchitectureTests(unittest.TestCase):
         request = PimTaskRequest("a.xlsx", True, False, False, False, False, "750")
         callbacks = TaskCallbacks(messages.append, messages.append, messages.append)
         task = PimTask(request, callbacks)
-        task.run_task_logic = lambda value: None
+        task.settings = {}
+        task.run_task_logic = lambda value: TaskResult(True, "任务完成")
         result = task.run()
         self.assertTrue(result.success)
 
@@ -121,7 +121,7 @@ class TaskArchitectureTests(unittest.TestCase):
 
     def test_main_window_and_home_cards(self):
         project = Path(__file__).resolve().parent.parent
-        source = (project / "main.py").read_text(encoding="utf-8")
+        source = (project / "main_tk.py").read_text(encoding="utf-8")
         self.assertIn("WINDOW_WIDTH = 552", source)
         self.assertIn("WINDOW_HEIGHT = 700", source)
         self.assertIn("self.root.resizable(False, False)", source)
@@ -208,7 +208,7 @@ class TaskArchitectureTests(unittest.TestCase):
 
     def test_focus_borders_and_section_backgrounds(self):
         project = Path(__file__).resolve().parent.parent
-        main_source = (project / "main.py").read_text(encoding="utf-8")
+        main_source = (project / "main_tk.py").read_text(encoding="utf-8")
         deedraw_source = (project / "deedraw/view.py").read_text(encoding="utf-8")
         pim_source = (project / "pim/view.py").read_text(encoding="utf-8")
         settings_source = (project / "common/unified_settings.py").read_text(encoding="utf-8")
@@ -241,7 +241,7 @@ class TaskArchitectureTests(unittest.TestCase):
         manifest = json.loads((project / "plugin.json").read_text(encoding="utf-8"))
         source = (project / "main.py").read_text(encoding="utf-8")
         self.assertIn(f'APP_VERSION = "{manifest["version"]}"', source)
-        self.assertIn('self.root.title(f"DDAS PLUS v{APP_VERSION}")', source)
+        self.assertIn('webview.create_window(f"DDAS PLUS v{APP_VERSION}"', source)
 
     def test_workflow_builds_both_macos_architectures(self):
         project = Path(__file__).resolve().parent.parent
@@ -283,14 +283,6 @@ class TaskArchitectureTests(unittest.TestCase):
         for phrase in ("'确 定'操作完成", "确认按钮点击成功", "登录按钮点击完成", "已在输入框中输入"):
             self.assertNotIn(phrase, source)
 
-    def test_shared_result_exporter(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = export_task_results(
-                {"task_result_path": directory}, 2, 1, 1,
-                [("color", 1, "红色")], [("color", 2, "蓝色")], 0, 3.2,
-            )
-            self.assertTrue(Path(path).is_file())
-
     def test_deedraw_config_adapter_has_no_result_export(self):
         project = Path(__file__).resolve().parent.parent
         source = (project / "deedraw/config_adapter.py").read_text(encoding="utf-8")
@@ -301,7 +293,6 @@ class TaskArchitectureTests(unittest.TestCase):
 
     def test_deedraw_task_accepts_plain_request(self):
         request = DeedrawTaskRequest(
-            "user", "password",
             [DeedrawFieldRequest("color", "data.xlsx", False, True, False, False)],
             {"chrome_path": "/browser"},
         )
@@ -310,6 +301,19 @@ class TaskArchitectureTests(unittest.TestCase):
             lambda value: TaskResult(value.fields[0].fill_pc_value)
         )
         self.assertTrue(result.success)
+
+
+    def test_version_history_button_matches_manifest(self):
+        project = Path(__file__).resolve().parent.parent
+        manifest = json.loads((project / "plugin.json").read_text(encoding="utf-8"))
+        main_jsx = (project / "frontend/src/main.jsx").read_text(encoding="utf-8")
+        changelog = (project / "frontend/src/changelog.js").read_text(encoding="utf-8")
+        styles = (project / "frontend/src/window.css").read_text(encoding="utf-8")
+        self.assertIn('aria-label="更新"', main_jsx)
+        self.assertIn("setModal('changelog')", main_jsx)
+        self.assertIn("CHANGELOG", main_jsx)
+        self.assertIn(f"version: '{manifest['version']}'", changelog)
+        self.assertIn(".changelog-release", styles)
 
 
 if __name__ == "__main__":

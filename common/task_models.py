@@ -30,12 +30,14 @@ class DeedrawFieldRequest:
     fill_pc_value: bool
     upload_mobile_image: bool
     fill_mobile_value: bool
+    overwrite_existing: bool = False
+    skip_existing: bool = False
+    modify_only: bool = False
+    rename_option: bool = False
 
 
 @dataclass(frozen=True)
 class DeedrawTaskRequest:
-    username: str
-    password: str
     fields: List[DeedrawFieldRequest]
     settings: Dict[str, Any]
 
@@ -49,3 +51,7 @@ class PimTaskRequest:
     upload_mobile_image: bool
     preset_module: bool
     pixel_size: str
+
+
+class TaskCancelled(Exception):
+    """Cooperative cancellation, distinct from a business failure."""

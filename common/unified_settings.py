@@ -30,7 +30,6 @@ class UnifiedSettingsDialog:
         paths = tk.LabelFrame(content, text="文件与日志", background='#ECECEC', borderwidth=1, relief=tk.SOLID, highlightthickness=0, padx=10, pady=10)
         paths.pack(fill=tk.X, pady=(0, 10))
         self.log_path = self._path_row(paths, "日志目录", self.settings.settings.get('log_export_path', ''))
-        self.result_path = self._path_row(paths, "结果目录", self.settings.settings.get('task_result_path', ''))
         self.config_path = self._path_row(paths, "配置目录", self.settings.settings.get('config_path', ''))
 
         browser = tk.LabelFrame(content, text="Chrome浏览器设置", background='#ECECEC', borderwidth=1, relief=tk.SOLID, highlightthickness=0, padx=10, pady=10)
@@ -105,7 +104,6 @@ class UnifiedSettingsDialog:
         try:
             values = {
                 'log_export_path': self.log_path.get().strip(),
-                'task_result_path': self.result_path.get().strip(),
                 'config_path': self.config_path.get().strip(),
                 'chrome_path': self.chrome_path.get().strip(),
             }

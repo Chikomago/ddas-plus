@@ -3,7 +3,6 @@ from tkinter import ttk
 import logging
 from tkinter import messagebox
 from deedraw.config_adapter import DeedrawConfigAdapter
-from deedraw.credentials import CredentialsManager
 from common.data_editor import DataEditor
 from common.task_runner import TaskRunner
 from common.task_models import DeedrawFieldRequest, DeedrawTaskRequest
@@ -33,7 +32,6 @@ class GUI:
 
         # 初始化模块
         self.file_handler = DeedrawConfigAdapter(settings=self.settings.settings)
-        self.credentials_manager = CredentialsManager()
         self.logger = shared_logger
         self.data_editor = DataEditor()
         self.task_runner = TaskRunner()
@@ -44,6 +42,8 @@ class GUI:
             self.task_runner,
             TaskCallbacks(
                 log=logging.info,
+                info=lambda text: self.root.after(0, lambda: messagebox.showinfo("任务完成", text)),
+                warning=lambda text: self.root.after(0, lambda: messagebox.showwarning("警告", text)),
                 status=lambda text: self.root.after(0, lambda: self.task_status.configure(text=text)),
                 error=lambda text: self.root.after(0, lambda: messagebox.showerror("错误", text)),
                 confirm=self.confirm_task_result,
@@ -77,58 +77,6 @@ class GUI:
         # 创建批量模式框架
         self.batch_mode_frame = ttk.Frame(self.main_frame)
         self.batch_mode_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=(12, 10))
-
-        # 账号密码框架
-        login_frame = tk.LabelFrame(
-            self.batch_mode_frame,
-            text='账号密码',
-            background='#ECECEC', borderwidth=1, relief=tk.SOLID,
-            highlightthickness=0,
-            padx=12, pady=8,
-        )
-        login_frame.pack(fill=tk.X)
-
-        # 账号行框架
-        account_frame = tk.Frame(login_frame, background='#ECECEC')
-        account_frame.pack(fill=tk.X, padx=10, pady=(8, 4))
-
-        tk.Label(
-            account_frame,
-            text="账号：",
-            background='#ECECEC'
-        ).pack(side=tk.LEFT, padx=5)
-
-        self.batch_ent_name = ttk.Entry(account_frame, style='Batch.TEntry')
-        self.batch_ent_name.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
-
-        # 添加保存按钮
-        ttk.Button(
-            account_frame,
-            text="保存",
-            command=self.save_credentials,
-            style='Batch.Small.TButton'
-        ).pack(side=tk.RIGHT, padx=5)
-
-        # 密码行框架
-        password_frame = tk.Frame(login_frame, background='#ECECEC')
-        password_frame.pack(fill=tk.X, padx=10, pady=(4, 8))
-
-        tk.Label(
-            password_frame,
-            text="密码：",
-            background='#ECECEC'
-        ).pack(side=tk.LEFT, padx=5)
-
-        self.batch_ent_pwd = ttk.Entry(password_frame, style='Batch.TEntry')
-        self.batch_ent_pwd.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
-
-        # 添加读取按钮
-        ttk.Button(
-            password_frame,
-            text="读取",
-            command=self.load_credentials,
-            style='Batch.Small.TButton'
-        ).pack(side=tk.RIGHT, padx=5)
 
         # 字段列表框架
         fields_frame = tk.LabelFrame(
@@ -207,8 +155,6 @@ class GUI:
                 fill_mobile_value=bool(row['mobile_opt_var'].get()),
             ))
         return DeedrawTaskRequest(
-            username=self.batch_ent_name.get().strip(),
-            password=self.batch_ent_pwd.get().strip(),
             fields=fields,
             settings=dict(self.settings.settings),
         )
@@ -234,60 +180,6 @@ class GUI:
 
 
 
-    def show_credentials_window(self, credentials):
-        """显示账号密码选择窗口"""
-        credentials_window = tk.Toplevel(self.root)
-        credentials_window.title("选择账号密码")
-        credentials_window.geometry("400x300")
-
-        # 创建主框架
-        main_frame = ttk.Frame(credentials_window)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-        # 设置树形视图样式
-        style = ttk.Style()
-        style.configure("Treeview",
-            font=('Microsoft YaHei UI', 10),
-            rowheight=25
-        )
-        # 设置选中行的样式
-        style.map('Treeview',
-            background=[('selected', '#CCE5FF')],  # 浅蓝色背景
-            foreground=[('selected', 'black')]     # 黑色文字
-        )
-
-            # 创建账号密码列表框
-        tree = ttk.Treeview(main_frame, columns=('Username', 'Password'), show='headings', height=10)
-        tree.heading('Username', text='账号')
-        tree.heading('Password', text='密码')
-        tree.column('Username', width=180)
-        tree.column('Password', width=180)
-
-        # 添加数据
-        for credential in credentials:
-            tree.insert('', tk.END, values=credential)
-
-        # 添加滚动条
-        scrollbar = ttk.Scrollbar(main_frame, orient=tk.VERTICAL, command=tree.yview)
-        tree.configure(yscrollcommand=scrollbar.set)
-
-        # 放置组件
-        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-
-        # 按钮框架
-        button_frame = ttk.Frame(credentials_window)
-        button_frame.pack(fill=tk.X, padx=10, pady=10)
-
-    def center_window(self):
-        w = 800
-        h = 600
-        sw = self.root.winfo_screenwidth()
-        sh = self.root.winfo_screenheight()
-        x = (sw - w) // 2
-        y = (sh - h) // 2
-        self.root.geometry('{}x{}+{}+{}'.format(w, h, x, y))
-
     def add_batch_field_row(self, is_first=False):
         """添加批量字段行"""
         try:
@@ -307,7 +199,7 @@ class GUI:
 
             tk.Label(
                 code_frame,
-                text="字段编码:",
+                text="字段名/编码:",
                 background='#ECECEC'
             ).pack(side=tk.LEFT)
 
@@ -485,93 +377,3 @@ class GUI:
 
         # 如果所有行都满足所有条件，启用按钮
         self.start_button.configure(state='normal')
-
-    def save_credentials(self):
-        """保存账号和密码"""
-        username = self.batch_ent_name.get()
-        password = self.batch_ent_pwd.get()
-        success, message = self.credentials_manager.save_credentials(username, password)
-        if success:
-            messagebox.showinfo("成功", message)
-        else:
-            messagebox.showerror("错误", message)
-
-    def load_credentials(self):
-        """从 user.txt 文件加载账号和密码"""
-        try:
-            credentials = self.credentials_manager.load_credentials()
-            if not credentials:
-                messagebox.showwarning("提示", "未找到有保存的账号")
-                return
-
-            # 创建新窗口
-            credentials_window = tk.Toplevel(self.root)
-            credentials_window.title("选择账号密码")
-            credentials_window.geometry("300x400")
-            credentials_window.grab_set()  # 模态窗口
-
-            # 创建框架
-            frame = ttk.Frame(credentials_window)
-            frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-            # 创建树形视图
-            tree = ttk.Treeview(frame, columns=('username', 'password'), show='headings')
-            tree.heading('username', text='账号', anchor='center')
-            tree.heading('password', text='密码', anchor='center')
-            tree.column('username', anchor='center', width=150)
-            tree.column('password', anchor='center', width=150)
-            tree.pack(fill=tk.BOTH, expand=True)
-
-            # 插入账号密码
-            for username, password in credentials:
-                tree.insert('', tk.END, values=(username, password))
-
-            def select_credential():
-                """选择凭证"""
-                try:
-                    if not credentials_window.winfo_exists():
-                        return  # 如果窗口已经被销毁，直接返回
-
-                    selected = tree.selection()
-                    if selected:
-                        item = tree.item(selected[0])
-                        username, password = item['values']
-                        self.batch_ent_name.delete(0, tk.END)
-                        self.batch_ent_name.insert(0, username)
-                        self.batch_ent_pwd.delete(0, tk.END)
-                        self.batch_ent_pwd.insert(0, password)
-                        credentials_window.destroy()
-                    else:
-                        messagebox.showwarning("提示", "请选择一个账号")
-
-                except Exception as e:
-                    error_msg = f"选择凭证失败: {str(e)}"
-                    logging.error(error_msg)
-                    messagebox.showerror("错误", error_msg)
-
-            # 添加按钮框架
-            button_frame = ttk.Frame(frame)
-            button_frame.pack(fill=tk.X, pady=10)
-
-            # 确定按钮
-            ttk.Button(
-                button_frame,
-                text="确定",
-                command=select_credential,
-                style='Batch.TButton'
-            ).pack(side=tk.LEFT, padx=5)
-
-            # 取消按钮
-            ttk.Button(
-                button_frame,
-                text="取消",
-                command=credentials_window.destroy,
-                style='Batch.TButton'
-            ).pack(side=tk.RIGHT, padx=5)
-
-            # 双击选择
-            tree.bind('<Double-1>', lambda e: select_credential())
-
-        except Exception as e:
-            logging.error(f"读取账号密码失败: {str(e)}")
-            messagebox.showerror("错误", f"读取账号密码失败: {str(e)}")

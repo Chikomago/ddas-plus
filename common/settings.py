@@ -3,23 +3,21 @@ import json
 import logging
 import platform
 from common.browser import BrowserInitializer
+from common.app_paths import app_data_dir
+from pathlib import Path
+import uuid
+import copy
 
 class Settings:
     def __init__(self):
-        # 使用系统用户数据目录，避免设置和结果依赖程序启动位置
-        if platform.system() == "Darwin":
-            self.base_dir = os.path.join(os.path.expanduser('~'), 'Library', 'Application Support', 'DDAS PLUS')
-        elif platform.system() == "Windows":
-            app_data = os.environ.get('APPDATA', os.path.join(os.path.expanduser('~'), 'AppData', 'Roaming'))
-            self.base_dir = os.path.join(app_data, 'DDAS PLUS')
-        else:
-            data_home = os.environ.get('XDG_DATA_HOME', os.path.join(os.path.expanduser('~'), '.local', 'share'))
-            self.base_dir = os.path.join(data_home, 'ddas-plus')
+        self.base_dir = str(app_data_dir())
 
         # 创建必要的子目录
         self.logs_dir = os.path.join(self.base_dir, 'logs')
         self.results_dir = os.path.join(self.base_dir, 'results')
-        self.configs_dir = os.path.join(self.base_dir, 'configs')
+        self._previous_configs_dir = os.path.join(self.base_dir, 'configs')
+        self.configs_dir = (str(Path.home() / 'DDAS' / 'configs')
+                            if platform.system() in ('Darwin', 'Windows') else self._previous_configs_dir)
 
         # 确保所有目录存在
         for directory in [self.base_dir, self.logs_dir, self.results_dir, self.configs_dir]:
@@ -52,10 +50,31 @@ class Settings:
             # 确保设置文件所在目录存在
             os.makedirs(os.path.dirname(self.settings_file), exist_ok=True)
 
-            with open(self.settings_file, 'w', encoding='utf-8') as f:
-                json.dump(self.settings, f, ensure_ascii=False, indent=4)
-        except Exception as e:
-            logging.error(f"保存设置失败: {str(e)}")
+            destination = Path(self.settings_file)
+            temporary = destination.with_name(f'.settings.{uuid.uuid4().hex}.tmp')
+            try:
+                temporary.write_text(json.dumps(self.settings, ensure_ascii=False, indent=4), encoding='utf-8')
+                os.replace(temporary, destination)
+            finally:
+                temporary.unlink(missing_ok=True)
+        except Exception:
+            logging.exception("保存设置失败")
+            raise
+
+    def _merge_settings(self, saved_settings):
+        if not isinstance(saved_settings, dict):
+            raise ValueError("设置文件格式不正确")
+        merged = copy.deepcopy(self.settings)
+        for key, value in saved_settings.items():
+            if key in ("chrome_path", "log_export_path", "task_result_path", "config_path") and (not isinstance(value, str) or not value.strip()):
+                raise ValueError(f"设置项 {key} 必须是有效路径")
+            if isinstance(merged.get(key), dict):
+                if not isinstance(value, dict):
+                    raise ValueError(f"设置项 {key} 格式不正确")
+                merged[key].update(value)
+            else:
+                merged[key] = value
+        self.settings = merged
 
     def load_settings(self):
         """从 settings.json 文件加载设置"""
@@ -63,15 +82,18 @@ class Settings:
             if os.path.exists(self.settings_file):
                 with open(self.settings_file, 'r', encoding='utf-8') as f:
                     saved_settings = json.load(f)
-                    # 更新设置，保留默认值
-                    self.settings.update(saved_settings)
+                self._merge_settings(saved_settings)
+                if (self.configs_dir != self._previous_configs_dir and
+                        self.settings["config_path"] == self._previous_configs_dir):
+                    self.settings["config_path"] = self.configs_dir
+                    self.save_settings()
             elif os.path.exists(self.legacy_settings_file):
                 with open(self.legacy_settings_file, 'r', encoding='utf-8') as f:
                     saved_settings = json.load(f)
                 # 迁移浏览器和业务设置，但采用新的统一默认目录
                 for key in ('log_export_path', 'task_result_path', 'config_path'):
                     saved_settings.pop(key, None)
-                self.settings.update(saved_settings)
+                self._merge_settings(saved_settings)
                 self.save_settings()
             else:
                 # 如果设置文件不存在，创建默认目录

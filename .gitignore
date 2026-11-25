@@ -20,3 +20,11 @@ results/
 *.log
 *.xlsx
 .DS_Store
+
+# Local recovery repository
+.rollback/
+.huashu-design/
+
+# Credentials (never commit)
+user.txt
+accounts.json

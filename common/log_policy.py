@@ -25,6 +25,8 @@ NOISY_PATTERNS = tuple(re.compile(pattern) for pattern in (
 
 def is_diagnostic_message(message):
     text = str(message)
+    if text.startswith(('[HTTP]', '[执行明细]', '[逐行结果]')):
+        return True
     if any(term in text for term in CRITICAL_TERMS):
         return True
     return not any(pattern.search(text) for pattern in NOISY_PATTERNS)

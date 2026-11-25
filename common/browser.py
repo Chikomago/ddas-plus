@@ -5,20 +5,50 @@ import platform
 import os
 import subprocess
 import webbrowser
+import shutil
+from pathlib import Path
+from common.app_paths import app_data_dir
 from DrissionPage import ChromiumPage, ChromiumOptions
 from threading import Thread
 
 
+def installed_chrome_path():
+    """Locate the regular installed Chrome, never a downloaded testing/headless binary."""
+    if platform.system() == 'Darwin':
+        candidates = [Path('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'),
+                      Path.home()/'Applications/Google Chrome.app/Contents/MacOS/Google Chrome']
+    elif platform.system() == 'Windows':
+        candidates = [Path(os.environ.get(name, default))/'Google/Chrome/Application/chrome.exe'
+                      for name,default in [('PROGRAMFILES','C:/Program Files'),
+                          ('PROGRAMFILES(X86)','C:/Program Files (x86)'),
+                          ('LOCALAPPDATA',str(Path.home()/'AppData/Local'))]]
+    else:
+        candidates = [Path(found) for name in ('google-chrome','google-chrome-stable')
+                      if (found := shutil.which(name))]
+    return str(next((path for path in candidates if path.is_file()), candidates[0] if candidates else Path('/usr/bin/google-chrome')))
+
+
 def create_browser(chrome_path=None, *, mute=True, auto_port=False, load_timeout=30):
-    """统一创建 DrissionPage 浏览器实例，供深绘和 PIM 共用。"""
+    """Visible installed Chrome with a persistent, plugin-owned profile."""
+    path = Path(chrome_path or installed_chrome_path()).expanduser()
+    if not path.is_file():
+        raise ValueError('未找到已安装的 Chrome，请在设置中选择电脑上的 Google Chrome 浏览器')
+    if any(marker in str(path).lower() for marker in ('for testing','chrome-for-testing','chrome-headless-shell')):
+        raise ValueError('请选择正常安装的 Google Chrome，不要选择 Chrome for Testing 或无头测试浏览器')
     options = ChromiumOptions()
-    if chrome_path:
-        options.set_browser_path(chrome_path)
+    options.set_browser_path(str(path))
+    options.headless(False)
+    options.remove_argument('--enable-automation')
     if mute:
         options.mute(True)
-    options.set_pref('credentials_enable_service', False)
     if auto_port:
+        # The explicit browser test uses an isolated profile and cannot close the task browser.
         options.auto_port(True)
+    else:
+        profile = app_data_dir() / 'browser-profile'
+        profile.mkdir(parents=True, exist_ok=True)
+        options.set_user_data_path(str(profile))
+        options.set_local_port(19333)
     page = ChromiumPage(addr_or_opts=options)
     if load_timeout is not None:
         page.set.load_mode.load_timeout = load_timeout
@@ -56,16 +86,9 @@ class BrowserInitializer:
 
         # 设置一些默认配置
         self.options.mute(True)  # 静音
-        self.options.set_pref('credentials_enable_service', False)  # 禁用保存密码提示
 
     def get_default_chrome_path(self):
-        """获取系统默认的Chrome浏览器路径"""
-        if platform.system() == "Windows":
-            return "C:/Program Files/Google/Chrome/Application/chrome.exe"
-        elif platform.system() == "Darwin":  # macOS
-            return "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-        else:  # Linux
-            return "/usr/bin/google-chrome"
+        return installed_chrome_path()
 
     def get_chrome_version(self):
         """获取当前安装的 Chrome 版本"""

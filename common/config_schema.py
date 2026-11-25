@@ -3,6 +3,7 @@
 from pathlib import Path
 
 
+RENAME_HEADER = "新选项名"
 VALUE_HEADERS = ["PC选项值", "移动选项值", "PC图路径", "移动图路径"]
 DEEDRAW_HEADERS = ["选项值名称（表头不要删）", *VALUE_HEADERS]
 PIM_HEADERS = ["选项名", *VALUE_HEADERS]
@@ -10,8 +11,10 @@ FIRST_HEADER_ALIASES = {"选项名", "选项值名称", "选项值名称（表�
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif"}
 
 
-def validate_headers(headers):
+def validate_headers(headers, *, allow_text=False):
     """Return whether headers match the shared five-column contract."""
+    if allow_text and len(headers) == 3:
+        return headers[0] in FIRST_HEADER_ALIASES and list(headers[1:]) == VALUE_HEADERS[:2]
     return (
         len(headers) >= 5
         and headers[0] in FIRST_HEADER_ALIASES

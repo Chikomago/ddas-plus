@@ -1,12 +1,25 @@
+from DrissionPage.errors import ContextLostError, ElementLostError, JavaScriptError
+from common.execution_audit import HttpAudit
+from deedraw.save_confirmation import SaveConfirmation
+from deedraw.upload_state import read_upload_state, backfill_complete
+from deedraw.forbidden_words import request_forbidden_words, is_forbidden_prompt
 import os
+import json
 import logging
 import time
 import threading
+from pathlib import Path
+from deedraw.page_state import SubmissionUnknown, validate_option_name, validate_upload_image, saved_location, read_options, form_feedback, is_option_edit_url, reset_option_form
 import openpyxl
 from common.browser import create_browser, close_browser
-from common.task_models import TaskCallbacks, TaskResult
-from common.task_results import TaskReport, format_task_report
-from common.result_exporter import export_task_results
+from common.task_models import TaskCallbacks, TaskResult, TaskCancelled
+from common.config_loader import read_config
+from common.task_results import TaskReport, format_task_report, report_result, publish_result
+from deedraw.field_lookup import resolve_field, read_field_snapshot
+
+
+class DuplicateOption(ValueError):
+    pass
 
 
 class DeedrawTask:
@@ -19,7 +32,7 @@ class DeedrawTask:
     def run(self, execute):
         self.callbacks.status("正在执行")
         try:
-            return execute(self.request) or TaskResult(True, "任务完成")
+            return execute(self.request) or TaskResult(False, "任务未返回执行结果")
         except Exception as error:
             self.callbacks.error(str(error))
             return TaskResult(False, str(error))
@@ -41,18 +54,6 @@ class TaskProcessor:
         self.callbacks = callbacks
 
         self.settings = None
-
-    def handle_confirm_button(self):
-        """处理确认按钮点击（DrissionPage版本）"""
-        try:
-            # 检测错误弹窗
-            confirm_btn = self.browser.ele('xpath://button[@data-bb-handler="confirm"]', timeout=1)
-            if confirm_btn:
-                confirm_btn.click()
-                return True
-        except Exception as e:
-            logging.warning(f"处理确认按钮时出错: {str(e)}")
-        return False
 
     def start(self, request):
         """启动任务处理；request 是 View 创建的不可变任务快照。"""
@@ -77,53 +78,64 @@ class TaskProcessor:
             return False
 
     def run_task(self, request):
-        """在线程中运行的完整任务流程"""
+        """Validate all fields first; preserve actual failures through the terminal result."""
         self.request = request
+        self.settings = request.settings
         self.running = True
-        final_status = "执行失败"
+        result = None
         try:
-            # 检查浏览器路径
+            self._configs = {id(row): read_config(row.config_path, options=(
+                row.upload_pc_image, row.fill_pc_value, row.upload_mobile_image, row.fill_mobile_value
+            ), rename_option=row.rename_option, allow_blank_content=row.modify_only) for row in request.fields}
+            if not request.fields:
+                raise ValueError("请至少添加一个字段")
+            for field in request.fields:
+                seen_names = set()
+                for number, values in self._configs[id(field)]:
+                    try:
+                        validate_option_name(values[0])
+                        if field.rename_option:
+                            validate_option_name(values[5])
+                        if values[0] in seen_names:
+                            raise ValueError('配置中有重复选项名，请先合并或修改')
+                        seen_names.add(values[0])
+                        for selected, column in ((field.upload_pc_image, 3), (field.upload_mobile_image, 4)):
+                            if selected and values[column]:
+                                validate_upload_image(values[column])
+                    except ValueError as error:
+                        raise ValueError(f'第 {number} 行：{error}') from error
             chrome_path = self.settings.get('chrome_path')
             if not chrome_path:
-                self.show_error("请先在设置中配置浏览器路径")
-                return TaskResult(False, "未配置浏览器路径")
-
-            # 更新任务状态
+                raise ValueError("请先在设置中配置浏览器路径")
+            self._check_stop()
             self.update_status("正在初始化浏览器...")
-
-            # 初始化浏览器
             if not self.initialize_browser(chrome_path):
-                self.show_error("浏览器初始化失败")
-                return TaskResult(False, "浏览器初始化失败")
-
-            # 登录
+                raise RuntimeError("浏览器初始化失败")
+            self._check_stop()
             self.update_status("正在登录...")
             if not self.login():
-                if self.browser:
-                    self.browser.quit()
-                    self.browser = None
-                return TaskResult(False, "登录失败")
-
-            # 执行主要任务
-            self.process_task()
-            if self.is_stop_requested():
-                final_status = "已终止"
-                return TaskResult(False, "任务已终止", {"cancelled": True})
-            final_status = "任务已完成"
-            return TaskResult(True, "任务完成")
-
-        except Exception as e:
-            error_msg = f"执行任务时出错: {str(e)}"
-            logging.error(error_msg)
-            self.show_error(error_msg)
-            return TaskResult(False, error_msg)
+                raise RuntimeError(getattr(self, '_login_error', '登录失败'))
+            result = self.process_task()
+        except TaskCancelled:
+            result = TaskResult(False, "任务已终止", {"cancelled": True})
+        except Exception as error:
+            logging.error("执行任务时出错: %s", error)
+            result = TaskResult(False, str(error))
         finally:
+            self.running = False
             self.cleanup_browser()
-            if self.is_stop_requested():
-                final_status = "已终止"
-            self.update_status(final_status)
-            if self.callbacks.finished:
-                self.callbacks.finished()
+        publish_result(self.callbacks, result)
+        if self.callbacks.finished:
+            self.callbacks.finished()
+        return result
+
+    def _check_stop(self):
+        if self.is_stop_requested():
+            raise TaskCancelled()
+
+    def _pause(self, seconds):
+        if self.task_runner.stop_event.wait(seconds):
+            raise TaskCancelled()
 
     def show_error(self, message):
         """在主线程中显示错误消息"""
@@ -131,105 +143,63 @@ class TaskProcessor:
         self.callbacks.error(message)
         self.update_status("就绪")
 
-    def get_field_tabindex(self, field_code):
-        """获取字段的tabindex"""
+    def get_field_tabindex(self, field_code, timeout=8):
+        """Wait for a stable list and cross-check the actual add-option link."""
+        self._check_stop()
+        self.browser.wait.doc_loaded()
+        deadline = time.monotonic()+timeout
+        previous = None
+        last_error = None
+        while True:
+            self._check_stop()
+            try:
+                snapshot = read_field_snapshot(self.browser)
+                if snapshot.get('ready'):
+                    fields = snapshot['fields']
+                    signature = json.dumps(fields, ensure_ascii=False, sort_keys=True)
+                    if signature == previous:
+                        number = resolve_field(field_code, fields)
+                        self._row_log(logging.INFO, '字段定位确认：%s → 编号 %s；已核对容器、tabindex和新增链接', field_code, number)
+                        return number
+                    previous = signature
+                else:
+                    previous = None
+            except TaskCancelled:
+                raise
+            except Exception as error:
+                last_error = error
+                previous = None
+            if time.monotonic() >= deadline:
+                if isinstance(last_error, ValueError):
+                    raise last_error
+                raise ValueError(f'字段列表未就绪或未能可靠定位“{field_code}”，请确认登录状态及字段列表')
+            self._pause(.2)
+
+    def login(self, timeout=600):
+        """Wait for user login in the visible Chrome window; never read or fill credentials."""
         try:
-
-            # 等待页面加载
-            self.browser.wait.doc_loaded()
-            time.sleep(1)
-
-            # 使用data-pinyin属性查找字段
-            field_td = self.browser.ele(f'xpath://td[@data-pinyin="{field_code}"]')
-
-            if not field_td:
-                logging.error(f"未找到字段 {field_code} 对应的单元格")
-                return None
-
-
-            # 获取父级tbody元素的id
-            tbody = field_td.parent('tag:tbody')
-
-            if not tbody:
-                logging.error("未找到父级tbody元素")
-                return None
-
-
-            # 从tbody的id中提取tabindex
-            tbody_id = tbody.attr('id')
-            if not tbody_id:
-                logging.error("tbody元素没有id属性")
-                return None
-
-
-            # 提取数字部分
-            tabindex = tbody_id.replace('fieldContainer', '')
-
-            # 构造并打印新的URL
-            new_url = f'https://www.deepdraw.biz/authorized/merchant/setting/productField/{tabindex}/addOption'
-
-            return tabindex
-
-        except Exception as e:
-            logging.error(f"获取字段tabindex时出错: {str(e)}")
-            return None
-
-    def login(self):
-        """进入深绘后台：复用有效 Cookie，仅在出现登录表单时提交账号密码。"""
-        try:
+            self._check_stop()
             self.browser.get(self.LOGIN_URL)
             self.browser.wait.doc_loaded()
-
-            username_input = None
-            deadline = time.time() + 10
-            while time.time() < deadline and not self.is_stop_requested():
+            deadline = time.monotonic() + timeout
+            announced = False
+            while True:
+                self._check_stop()
                 if str(self.browser.url).startswith(self.AUTHORIZED_PREFIX):
-                    logging.info("已检测到有效登录状态")
+                    logging.info("已检测到登录成功")
                     return self.open_field_settings()
-                username_input = self.browser.ele('#credential', timeout=0.5)
-                if username_input:
-                    break
-                time.sleep(0.2)
-
-            if not username_input:
-                raise Exception("既未进入后台，也未检测到登录表单")
-
-            username = self.request.username
-            password = self.request.password
-            if not username or not password:
-                raise ValueError("当前 Cookie 已失效，请输入账号和密码")
-
-            password_input = self.browser.ele('#password', timeout=2)
-            if not password_input:
-                raise Exception("未找到密码输入框")
-
-            username_input.clear()
-            username_input.input(username)
-            password_input.clear()
-            password_input.input(password)
-
-            login_button = self.browser.ele(
-                'xpath://span[contains(@class, "btnLogin")]', timeout=2
-            )
-            if not login_button:
-                raise Exception("未找到登录按钮")
-            login_button.click()
-
-            deadline = time.time() + 15
-            while time.time() < deadline and not self.is_stop_requested():
-                if str(self.browser.url).startswith(self.AUTHORIZED_PREFIX):
-                    logging.info("登录成功")
-                    return self.open_field_settings()
-                time.sleep(0.2)
-            raise Exception("登录失败，未跳转到后台页面")
-
-        except ValueError as e:
-            logging.error(f'登录失败: {str(e)}')
-            self.callbacks.error(str(e))
-            return False
-        except Exception as e:
-            logging.error(f'登录失败: {str(e)}')
-            self.callbacks.error(f"登录失败: {str(e)}")
+                if not announced:
+                    self.update_status("请在浏览器中登录深绘，登录后自动继续")
+                    logging.info("请在浏览器中输入账号密码，完成登录后任务将自动继续")
+                    announced = True
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("等待登录超时，请重新开始任务并在浏览器中完成登录")
+                self._pause(.3)
+        except TaskCancelled:
+            raise
+        except Exception as error:
+            self._login_error = str(error)
+            logging.error("登录失败: %s", error)
             return False
 
     def open_field_settings(self):
@@ -241,185 +211,191 @@ class TaskProcessor:
         raise Exception("登录状态已失效，无法进入字段设置页")
 
     def process_task(self):
-        """处理所有字段行的任务"""
-        logging.info("深绘批量任务开始")
-        self.running = True  # 确保任务开始时设置为运行状态
-
-        # 首先初始化所有需要的变量
-        total_tasks = 0
-        completed_task_info = []  # 初始化为空列表
-        failed_task_info = []    # 初始化为空列表
-        start_time = time.time()
-
+        self._success_rows, self._failure_rows = [], []
+        self._skipped_rows, self._overwritten_rows, self._modified_rows = [], [], []
+        self._http_stats = {}
+        self._uncertain_rows = []
+        started = time.monotonic()
+        total = sum(len(rows) for rows in self._configs.values())
         try:
-            # 首先计算总任务数
-            for row_info in self.request.fields:
-                field_code = row_info.code
-                if not field_code:
-                    continue
+            for row in self.request.fields:
+                self._check_stop()
+                self.process_single_field(row, row.code, self._success_rows, self._failure_rows)
+        except (TaskCancelled, SubmissionUnknown):
+            pass
+        self._report = TaskReport(total, len(self._success_rows), len(self._failure_rows),
+            time.monotonic()-started,
+            [f"{field} - {number}: {value}" for field,number,value in self._success_rows],
+            [f"{field} - {number}: {reason}" for field,number,reason in self._failure_rows],
+            **self.conflict_report_details())
+        result = report_result(self._report, cancelled=self.is_stop_requested())
+        result.details['http'] = self._http_stats
+        result.details['uncertain_rows'] = list(self._uncertain_rows)
+        if self._uncertain_rows:
+            result.message += '\n提交结果待确认：\n'+'\n'.join(self._uncertain_rows)+'\n已暂停后续执行，请核对页面后再运行。'
+        logging.info('[HTTP] 深绘任务汇总：%s', self._http_stats)
+        return result
 
-                # 读取Excel文件获取行数
-                try:
-                    wb = openpyxl.load_workbook(row_info.config_path)
-                    sheet = wb.active
-                    # 减去标题行
-                    row_count = sheet.max_row - 1
-                    total_tasks += row_count
-                    wb.close()
-                except Exception as e:
-                    logging.error(f"计算字段 {field_code} 的任务数时出错: {str(e)}")
-                    continue
+    def conflict_report_details(self):
+        return {
+            'skipped_details': [f'{field} - {row}: {value}' for field, row, value in self._skipped_rows],
+            'modified_details': [f'{field} - {row}: {value}' for field, row, value in self._modified_rows],
+            'overwritten_details': [f'{field} - {row}: {value}' for field, row, value in self._overwritten_rows],
+        }
 
-            # 处理每个字段
-            for row_info in self.request.fields:
-                if self.is_stop_requested():
-                    logging.info("任务已终止")
-                    break
-
-                field_code = row_info.code
-                if not field_code:
-                    continue
-
-                # 处理单个字段
-                self.process_single_field(row_info, field_code, completed_task_info, failed_task_info)
-
-            # 显示结果
-            self.show_final_results(total_tasks, len(completed_task_info), len(failed_task_info),
-                                  completed_task_info, failed_task_info, start_time)
-
-        except Exception as e:
-            logging.error(f"执行批量任务时出错: {str(e)}")
-            self.callbacks.error(f"执行批量任务时出错: {str(e)}")
-            self.update_status("执行出错")
-        finally:
-            self.running = False
-            self.cleanup_browser()
-            logging.info("任务已终止" if self.is_stop_requested() else "深绘批量任务完成")
+    def _record_skip(self, field_code, number, value, reason="已有选项"):
+        self._skipped_rows.append((field_code, number, value if reason=="已有选项" else f"{value}（{reason}）"))
+        self._row_log(logging.INFO, '跳过%s：%s', reason, value)
 
     def process_single_field(self, row_info, field_code, completed_task_info, failed_task_info):
-        """处理单个字段的逻辑"""
+        modify_only = getattr(row_info, 'modify_only', False) is True
+        rename = modify_only and getattr(row_info, 'rename_option', False) is True
+        rows = getattr(self, '_configs', {}).get(id(row_info))
+        if rows is None:
+            rows = read_config(row_info.config_path, options=(row_info.upload_pc_image,
+                row_info.fill_pc_value, row_info.upload_mobile_image, row_info.fill_mobile_value),
+                rename_option=rename, allow_blank_content=modify_only)
+        overwrite = getattr(row_info, 'overwrite_existing', False) is True
+        skip_existing = getattr(row_info, 'skip_existing', False) is True
+        if not hasattr(self, '_skipped_rows'):
+            self._skipped_rows, self._overwritten_rows, self._modified_rows = [], [], []
+        matches = {}
         try:
-            logging.info(f"开始处理字段: {field_code}")  # 添加调试信息
-            # 检查浏览器状态并重新初始化
-            self.browser.refresh()
-            self.browser.wait.doc_loaded()  # 等待页面加载完成
-
-            # 打开字段设置页面
-            self.browser.get('https://www.deepdraw.biz/authorized/merchant/setting/productFields')
+            self._check_stop()
+            self.browser.get(self.FIELD_SETTINGS_URL)
             self.browser.wait.doc_loaded()
-            time.sleep(2)  # 额外等待时间
-
-            # 获取字段的tabindex
             field_tabindex = self.get_field_tabindex(field_code)
             if not field_tabindex:
-                logging.error(f'字段 {field_code} 获取tabindex失败，跳过当前字段')
-                return
-
-            logging.info(f'字段 {field_code} 的tabindex为: {field_tabindex}')
-
-            # 设置复选框状态
-            # 读取Excel文件
-            wb = openpyxl.load_workbook(row_info.config_path)
-            sheet = wb.active
-            data_rows = list(sheet.iter_rows(min_row=2, values_only=True))
-
-            # 处理每一行数据
-            for i, row_data in enumerate(data_rows, start=2):
-                if self.is_stop_requested():
-                    logging.info("任务已终止，停止处理数据")
-                    break
-
-                try:
-                    self.update_status(f"正在处理字段 {field_code} 的第 {i-1}/{len(data_rows)} 条数据")
-
-                    # 构造目标URL
-                    target_url = f'https://www.deepdraw.biz/authorized/merchant/setting/productField/{field_tabindex}/addOption'
-                    self.browser.get(target_url)
-
-                    # 等待页面加载完成
-                    self.browser.wait.doc_loaded()
-
-                    # 处理选项名称
-                    self.handle_value(row_data[0])
-
-                    # 根据复选框选择执行相应操作
-                    if row_info.fill_pc_value:
-                        self.handle_pc_options(row_data[1])
-                    if row_info.fill_mobile_value:
-                        self.handle_mobile_options(row_data[2])
-                    if row_info.upload_pc_image:
-                        self.pc_upload_file(row_data[3])
-                    if row_info.upload_mobile_image:
-                        self.mobile_upload_file(row_data[4])
-
-                    # 点击保存按钮
-                    submit_button = self.browser.ele('xpath://span[contains(@class, "button_submit3")]')
-                    if submit_button:
-                        submit_button.click()
-
-                        # 点击提交后立即检查是否需要处理确认按钮
-                        if row_info.fill_pc_value or row_info.fill_mobile_value:
-                            self.handle_confirm_button()
-
-                        # 添加提交成功校验
-                        start_time = time.time()
-                        success = False
-                        while time.time() - start_time < 5:  # 最多等待5秒
-                            if f'lastOperatedFieldId={field_tabindex}' in self.browser.url:
-                                success = True
-                                break
-                            time.sleep(0.1)
-
-                        if success:
-                            completed_task_info.append((field_code, i-1, row_data[0]))
-                        else:
-                            failed_task_info.append((field_code, i-1, row_data[0]))
-                            logging.error(f'字段 {field_code} - 第 {i-1} 条数据提交失败，未检测到提交成功URL')
-                            continue
-                    else:
-                        raise Exception("未找到保存按钮")
-
-                except Exception as e:
-                    failed_task_info.append((field_code, i-1, row_data[0]))
-                    logging.error(f'字段 {field_code} - 处理第 {i-1} 条数据时出错: {str(e)}')
-
-            wb.close()
-            logging.info(f'字段 {field_code} 处理完成')
-
-        except Exception as e:
-            logging.error(f'处理字段 {field_code} 时出错: {str(e)}')
-
-    def show_final_results(self, total_tasks, completed_tasks, failed_tasks,
-                          completed_task_info, failed_task_info, start_time):
-        """显示任务执行结果"""
-        duration = time.time() - start_time
-        minutes = int(duration // 60)
-        seconds = duration % 60
-        report = TaskReport(
-            total_tasks, completed_tasks, failed_tasks, duration,
-            [f"{field} - {row}: {content}" for field, row, content in completed_task_info],
-            [f"{field} - {row}: {reason}" for field, row, reason in failed_task_info],
-        )
-        message = format_task_report(report)
-
-        # 在主线程中显示结果
-        def show_results():
-            try:
-                if self.callbacks.confirm and self.callbacks.confirm(message + "\n\n是否导出执行结果到Excel文件？"):
-                    export_task_results(
-                        self.settings, total_tasks, completed_tasks, failed_tasks,
-                        completed_task_info, failed_task_info, minutes, seconds,
-                    )
+                raise ValueError(f"未找到字段 {field_code} 对应的单元格或字段编号")
+            existing = read_options(self.browser, field_tabindex)
+            if existing is None:
+                if overwrite or modify_only:
+                    raise ValueError('字段选项列表未就绪，无法匹配已有选项')
+                existing = []
+                self._row_log(logging.INFO, '字段选项HTML未就绪，名称重复由页面服务端校验')
+            if overwrite or skip_existing or modify_only:
+                for item in existing:
+                    matches.setdefault(item['value'], {})[item['id']] = item
+                found = sum(values[0] in matches for _, values in rows)
+                if modify_only:
+                    self._row_log(logging.INFO, '修改模式：%s 条匹配已有选项，%s 条未找到', found, len(rows)-found)
                 else:
-                    self.update_status("任务已完成")
-            except Exception as e:
-                logging.error(f"显示结果时出错: {str(e)}")
-
-        show_results()
+                    self._row_log(logging.INFO, '冲突处理：%s；%s 条同名，%s 条走新增', '覆盖' if overwrite else '跳过', found, len(rows)-found)
+        except TaskCancelled:
+            raise
+        except Exception as error:
+            failed_task_info.extend((field_code, number, str(error)) for number,_ in rows)
+            return
+        for index, (number, values) in enumerate(rows, 1):
+            self._check_stop()
+            self._current_row = (field_code, number)
+            try:
+                self.update_status(f"正在处理字段 {field_code} 的第 {index}/{len(rows)} 条数据")
+                targets = matches.get(values[0], {})
+                if modify_only and not targets:
+                    self._record_skip(field_code, number, values[0], '未找到待修改选项')
+                    continue
+                submitted_name = values[5] if rename else values[0]
+                if skip_existing and targets and not modify_only:
+                    self._record_skip(field_code, number, values[0])
+                    continue
+                target_errors = []
+                for target in targets.values() if targets else (None,):
+                    self._check_stop()
+                    try:
+                        confirmation = SaveConfirmation()
+                        with HttpAudit(self.browser, f"深绘 字段 {field_code} 第 {number} 行", getattr(self, "_http_stats", None), request_observer=confirmation):
+                            validate_option_name(submitted_name)
+                            before_ids = {item['id'] for item in existing}
+                            option_id = ''
+                            if target is not None:
+                                if not confirmation.save_monitoring:
+                                    raise ValueError('编辑保存确认监听不可用，未修改该选项')
+                                edit_url = target.get('edit_url')
+                                option_id = target['id']
+                                if not is_option_edit_url(edit_url, field_tabindex, option_id):
+                                    raise ValueError('未找到当前选项对应的修改入口')
+                                self._row_log(logging.INFO, '%s现有选项：%s（ID %s）', '修改' if modify_only else '覆盖', values[0], option_id)
+                                self.browser.get(edit_url)
+                            else:
+                                self.browser.get(f'https://www.deepdraw.biz/authorized/merchant/setting/productField/{field_tabindex}/addOption')
+                            self.browser.wait.doc_loaded()
+                            self._check_stop()
+                            if option_id:
+                                if not is_option_edit_url(self.browser.url, field_tabindex, option_id):
+                                    raise ValueError('编辑表单与目标选项不符')
+                                if modify_only:
+                                    selected = [rename, row_info.fill_pc_value, row_info.fill_mobile_value,
+                                                row_info.upload_pc_image, row_info.upload_mobile_image]
+                                    cleared = reset_option_form(self.browser, values[0], selected)
+                                else:
+                                    cleared = reset_option_form(self.browser, values[0])
+                                if not cleared:
+                                    raise ValueError('编辑表单与目标选项不符，或无法清空旧内容')
+                            else:
+                                confirmation.expect_name(field_tabindex, values[0])
+                            if not modify_only or rename:
+                                self.handle_value(submitted_name)
+                            if not option_id:
+                                self.check_option_name(confirmation)
+                            if row_info.fill_pc_value and values[1]:
+                                self.handle_pc_options(values[1])
+                            if row_info.fill_mobile_value and values[2]:
+                                self.handle_mobile_options(values[2])
+                            self.check_forbidden_words([values[1] if row_info.fill_pc_value else '', values[2] if row_info.fill_mobile_value else ''])
+                            if row_info.upload_pc_image and values[3] and not self.pc_upload_file(values[3]):
+                                raise RuntimeError("PC图片上传失败或超时")
+                            if row_info.upload_mobile_image and values[4] and not self.mobile_upload_file(values[4]):
+                                raise RuntimeError("移动图片上传失败或超时")
+                            self._check_stop()
+                            if option_id:
+                                self.submit_and_verify(field_tabindex, submitted_name, before_ids, confirmation=confirmation,
+                                                       option_id=option_id)
+                            else:
+                                existing = self.submit_and_verify(field_tabindex, values[0], before_ids, confirmation=confirmation)
+                    except DuplicateOption:
+                        raise
+                    except (SubmissionUnknown, TaskCancelled):
+                        raise
+                    except Exception as error:
+                        if target is None:
+                            raise
+                        reason = f"选项 ID {target['id']}：{error}"
+                        self._row_log(logging.ERROR, '%s', reason)
+                        target_errors.append(reason)
+                if target_errors:
+                    raise RuntimeError('；'.join(target_errors))
+                detail = f'{values[0]} → {submitted_name}' if submitted_name != values[0] else values[0]
+                completed_task_info.append((field_code, number, detail))
+                if modify_only:
+                    self._modified_rows.append((field_code, number, detail))
+                    self._row_log(logging.INFO, '修改成功：%s（%s 个选项）', detail, len(targets))
+                elif targets:
+                    self._overwritten_rows.append((field_code, number, values[0]))
+                    self._row_log(logging.INFO, '覆盖成功：%s（%s 个同名选项）', values[0], len(targets))
+            except DuplicateOption as error:
+                if skip_existing:
+                    self._record_skip(field_code, number, values[0])
+                else:
+                    failed_task_info.append((field_code, number, f"{values[0]}：{error}"))
+            except SubmissionUnknown as error:
+                detail = f'字段 {field_code} 第 {number} 行：{error}'
+                if not hasattr(self, '_uncertain_rows'):
+                    self._uncertain_rows = []
+                self._uncertain_rows.append(detail)
+                self._row_log(logging.WARNING, '提交结果未知 %s；暂停后续处理', detail)
+                raise
+            except TaskCancelled:
+                raise
+            except Exception as error:
+                failed_task_info.append((field_code, number, f"{values[0]}：{error}"))
+                logging.error("字段 %s - 第 %s 行失败: %s", field_code, number, error)
+            finally:
+                self._current_row = None
 
     def cleanup_browser(self):
         """清理浏览器资源"""
-        keep_open = not self.settings.get('browser_settings', {}).get('auto_close', False)
+        keep_open = bool(getattr(self, '_uncertain_rows', [])) or (not self.is_stop_requested() and not (self.settings or {}).get('browser_settings', {}).get('auto_close', False))
         self.browser = close_browser(self.browser, keep_open=keep_open)
 
     def update_status(self, message):
@@ -440,145 +416,192 @@ class TaskProcessor:
         except Exception as e:
             error_msg = f"浏览器初始化失败: {str(e)}"
             logging.error(error_msg)
-            self.callbacks.error(error_msg)
             return False
+
+    def _row_log(self, level, message, *args):
+        row = getattr(self, '_current_row', None)
+        context = f'字段 {row[0]} 第 {row[1]} 行 | ' if row else '深绘 | '
+        logging.log(level, '[逐行结果] '+context+message, *args)
+
+    def check_option_name(self, confirmation, timeout=10):
+        if not confirmation.validation_monitoring:
+            raise ValueError('名称查重接口监听不可用，未提交该行')
+        try:
+            self.browser.run_js("if(!window.jQuery||!window.validator)throw Error('校验器未就绪');jQuery('#value').trigger('blur');jQuery('#value').valid();")
+            deadline = time.monotonic()+timeout
+            while time.monotonic() < deadline:
+                self._check_stop()
+                if confirmation.name_done.is_set():
+                    if confirmation.name_result is False:
+                        self._row_log(logging.WARNING, '名称查重接口返回false：名称重复，不执行上传和提交')
+                        raise DuplicateOption('字段选项名称重复（接口返回false）')
+                    if confirmation.name_result is True:
+                        self._row_log(logging.INFO, '名称查重接口返回true：当前字段及名称校验通过')
+                        return
+                    raise ValueError('名称查重接口响应异常，未提交该行')
+                self._pause(.1)
+        except (ValueError, TaskCancelled):
+            raise
+        except Exception as error:
+            raise ValueError('名称查重接口校验失败，未提交该行') from error
+        raise ValueError('名称查重接口等待超时，未提交该行')
+
+    def check_forbidden_words(self, contents):
+        self._check_stop()
+        try:
+            hits = request_forbidden_words(self.browser, contents)
+        except Exception as error:
+            self._check_stop()
+            self._row_log(logging.WARNING, '违禁词接口校验未完成，跳过该行：%s', error)
+            raise ValueError(f'违禁词接口校验未完成：{error}') from error
+        self._check_stop()
+        if hits:
+            self._row_log(logging.WARNING, '违禁词接口命中：%s', '、'.join(hits))
+            self._row_log(logging.INFO, '违禁词按默认策略继续，页面同类确认框将自动确认')
+        else:
+            self._row_log(logging.INFO, '违禁词接口检查通过（无文本内容或响应为空）')
+        return hits
+
+    def submit_and_verify(self, field_id, value, before_ids, timeout=30, confirmation=None, option_id=""):
+        has_content = self.browser.run_js("""
+            const form = document.querySelector('#mainForm');
+            const fields = ['textInputOfPc', 'filePathOfPc', 'textInputOfMobile', 'filePathOfMobile']
+                .map(id => form?.querySelector('#' + id));
+            if (fields.some(field => !field)) return null;
+            if (!fields.some(field => field.value.trim() !== '')) return false;
+            // Sync page validation with the final draft before submitting.
+            form.querySelectorAll('textarea,#value').forEach(field => {
+                field.dispatchEvent(new Event('change', {bubbles:true}));
+                field.dispatchEvent(new Event('blur', {bubbles:true}));
+            });
+            return true;
+        """)
+        if has_content is False:
+            raise ValueError('手机端和PC端至少填写一个')
+        if has_content is not True:
+            raise ValueError('无法读取深绘表单的 PC 和移动端内容')
+        submit = self.browser.ele('css:span.button_submit3', timeout=3)
+        if not submit:
+            raise RuntimeError('未找到提交按钮')
+        try:
+            if confirmation is not None:
+                if option_id:
+                    confirmation.arm(field_id, value, option_id)
+                else:
+                    confirmation.arm(field_id, value)
+            submit.click()
+            deadline = time.monotonic()+timeout
+            handled_dialog = False
+            while time.monotonic() < deadline:
+                self._check_stop()
+                if confirmation is not None and confirmation.confirmed.is_set():
+                    return []
+                if confirmation is not None and confirmation.server_error is not None:
+                    break
+                try:
+                    returned = saved_location(self.browser.url, field_id)
+                    if returned:
+                        options = read_options(self.browser, field_id) if not option_id else None
+                        if options is not None and any(item['id'] not in before_ids and item['value'] == value for item in options):
+                            return options
+                    else:
+                        feedback = form_feedback(self.browser)
+                except (ContextLostError, ElementLostError, JavaScriptError):
+                    # The form document can disappear before the redirect reaches the listener.
+                    self._pause(.2)
+                    continue
+                if not returned:
+                    if feedback['errors'] and not feedback.get('pending'):
+                        raise ValueError('页面校验失败：'+'；'.join(feedback['errors']))
+                    if feedback['dialog']:
+                        if feedback['confirm'] and not handled_dialog:
+                            if not is_forbidden_prompt(feedback['dialog']):
+                                raise ValueError('出现未识别的确认弹窗，未自动点击：'+feedback['dialog'])
+                            self._row_log(logging.WARNING, '触发违禁词页面弹窗：%s', feedback['dialog'])
+                            self._check_stop()
+                            clicked = self.browser.run_js("""
+                                const text=arguments[0];
+                                const dialog=Array.from(document.querySelectorAll('.bootbox-confirm')).find(e=>
+                                  e.getClientRects().length&&(e.querySelector('.bootbox-body')?.textContent||'').trim()===text);
+                                const button=dialog?.querySelector('button[data-bb-handler="confirm"]');
+                                if(!button)return false;
+                                button.click();return true;
+                            """, feedback['dialog'])
+                            if not clicked:
+                                raise ValueError('未找到当前违禁词弹窗的确认按钮')
+                            handled_dialog = True
+                            self._row_log(logging.WARNING, '已默认确认违禁词弹窗：%s', feedback['dialog'])
+                        elif not feedback['confirm']:
+                            raise ValueError('页面提示：'+feedback['dialog'])
+                self._pause(.2)
+        except (ValueError, TaskCancelled):
+            raise
+        except Exception as error:
+            logging.warning('提交等待异常，将回查选项：%s', error)
+        if confirmation is not None and confirmation.confirmed.is_set():
+            return []
+        if confirmation is not None and confirmation.server_error is not None:
+            operation = f'修改选项 {option_id}' if option_id else '新增选项'
+            raise SubmissionUnknown(f'{operation}时保存接口返回 HTTP {confirmation.server_error}，是否写入待确认，不自动重试')
+        if option_id:
+            raise SubmissionUnknown(f'未确认选项 {option_id} 的修改是否保存，不自动重试')
+        self._row_log(logging.WARNING, '未获取匹配的303保存确认，尝试HTML回查；不重复提交')
+        # Never click submit again. A late server response may already have created it.
+        try:
+            self._check_stop()
+            self.browser.get(self.FIELD_SETTINGS_URL)
+            self.browser.wait.doc_loaded()
+            if confirmation is not None and confirmation.confirmed.is_set():
+                return []
+            options = read_options(self.browser, field_id)
+            if options is not None and any(item['id'] not in before_ids and item['value'] == value for item in options):
+                self._row_log(logging.INFO, '超时回查确认新增选项已保存')
+                return options
+        except TaskCancelled:
+            raise
+        except Exception as error:
+            logging.warning('保存结果回查异常：%s', error)
+        if confirmation is not None and confirmation.confirmed.is_set():
+            return []
+        raise SubmissionUnknown('未确认新增选项是否保存，不自动重试')
 
     def pc_upload_file(self, file_path):
-        """PC端上传文件（优化版）"""
-        try:
-
-            # 1. 等待页面加载完成
-            self.browser.wait.doc_loaded()
-
-            # 2. 通过JavaScript模拟触发imageAdd的点击事件
-            self.browser.run_js('''
-                var event = new MouseEvent('click', {
-                    'view': window,
-                    'bubbles': true,
-                    'cancelable': true
-                });
-                // 阻止默认行为(阻止文件选择框弹出)
-                var originalClick = HTMLElement.prototype.click;
-                HTMLElement.prototype.click = function() {
-                    // 不执行实际的点击
-                };
-                // 触发事件
-                document.querySelector('div.pcImages a[name="imageAdd"]').dispatchEvent(event);
-                // 恢复原始click方法
-                HTMLElement.prototype.click = originalClick;
-            ''')
-
-            # 3. 等待文件输入框出现
-            file_input = self.browser.ele('#fileToUploadOfPc_1', timeout=5)
-            if not file_input:
-                logging.error("未找到文件输入框")
-                return False
-
-            # 4. 确保上传组件已初始化完成
-            time.sleep(1)
-
-            # 5. 设置文件路径
-            file_input.input(file_path)
-
-            # 6. 优化等待上传完成的逻辑
-            start_time = time.time()
-            while time.time() - start_time < 5:  # 减少最大等待时间到5秒
-                # 首先检查上传是否完成，因为这是最常见的情况
-                file_path_input = self.browser.ele('xpath://input[@id="filePathOfPc"]', timeout=0.05)
-                if file_path_input and file_path_input.attr('value'):
-                    file_path_value = file_path_input.attr('value')
-
-                    # 检查图片是否成功加载，减少等待时间
-                    img_element = self.browser.ele(f'xpath://div[contains(@class, "pcImages")]//img[contains(@src, "{file_path_value}")]', timeout=1)
-                    if img_element:
-                        return True
-
-                # 其次检查是否有错误，因为这种情况较少
-                error_dialog = self.browser.ele('xpath://div[contains(@class, "bootbox-alert")]', timeout=0.05)
-                if error_dialog:
-                    error_text = error_dialog.text
-                    logging.error(f"上传出现错误: {error_text}")
-                    ok_button = self.browser.ele('xpath://div[contains(@class, "bootbox-alert")]//button[contains(text(), "确定")]')
-                    if ok_button:
-                        ok_button.click()
-                    return False
-
-                time.sleep(0.05)  # 进一步减少轮询间隔
-
-            logging.error("文件上传超时")
-            return False
-
-        except Exception as e:
-            logging.error(f"PC端上传文件失败: {str(e)}")
-            return False
+        return self._upload_image(file_path, 'Pc')
 
     def mobile_upload_file(self, file_path):
-        """移动端上传文件（优化版）"""
+        return self._upload_image(file_path, 'Mobile')
+
+    def _upload_image(self, file_path, platform):
+        label = 'PC' if platform == 'Pc' else '移动'
         try:
-
-            # 1. 等待页面加载完成
-            self.browser.wait.doc_loaded()
-
-            # 2. 通过JavaScript模拟触发imageAdd的点击事件
-            self.browser.run_js('''
-                var event = new MouseEvent('click', {
-                    'view': window,
-                    'bubbles': true,
-                    'cancelable': true
-                });
-                // 阻止默认行为(阻止文件选择框弹出)
-                var originalClick = HTMLElement.prototype.click;
-                HTMLElement.prototype.click = function() {
-                    // 不执行实际的点击
-                };
-                // 触发事件
-                document.querySelector('div.mobileImages a[name="imageAdd"]').dispatchEvent(event);
-                // 恢复原始click方法
-                HTMLElement.prototype.click = originalClick;
-            ''')
-
-            # 3. 等待文件输入框出现
-            file_input = self.browser.ele('#fileToUploadOfMobile_1', timeout=5)
+            image = validate_upload_image(file_path)
+            self._check_stop()
+            file_input = self.browser.ele(f'#fileToUploadOf{platform}_1', timeout=5)
             if not file_input:
-                logging.error("未找到文件输入框")
-                return False
-
-            # 4. 确保上传组件已初始化完成
-            time.sleep(1)
-
-            # 5. 设置文件路径
-            file_input.input(file_path)
-
-            # 6. 优化等待上传完成的逻辑
-            start_time = time.time()
-            while time.time() - start_time < 5:  # 减少最大等待时间到5秒
-                # 首先检查上传是否完成，因为这是最常见的情况
-                file_path_input = self.browser.ele('xpath://input[@id="filePathOfMobile"]', timeout=0.05)
-                if file_path_input and file_path_input.attr('value'):
-                    file_path_value = file_path_input.attr('value')
-
-                    # 检查图片是否成功加载，减少等待时间
-                    img_element = self.browser.ele(f'xpath://div[contains(@class, "mobileImages")]//img[contains(@src, "{file_path_value}")]', timeout=1)
-                    if img_element:
-                        return True
-
-                # 其次检查是否有错误，因为这种情况较少
-                error_dialog = self.browser.ele('xpath://div[contains(@class, "bootbox-alert")]', timeout=0.05)
-                if error_dialog:
-                    error_text = error_dialog.text
-                    logging.error(f"上传出现错误: {error_text}")
-                    ok_button = self.browser.ele('xpath://div[contains(@class, "bootbox-alert")]//button[contains(text(), "确定")]')
-                    if ok_button:
-                        ok_button.click()
-                    return False
-
-                time.sleep(0.05)  # 进一步减少轮询间隔
-
-            logging.error("文件上传超时")
-            return False
-
-        except Exception as e:
-            logging.error(f"移动端上传文件失败: {str(e)}")
+                raise RuntimeError('未找到文件输入框')
+            before = read_upload_state(self.browser, platform)
+            if not before.get('present'):
+                raise RuntimeError('图片回填控件未就绪')
+            # The supplied page binds change on mainForm; only these two globals
+            # are needed for its upload callback. Do not patch HTMLElement.click.
+            self.browser.run_js("if(typeof currentSortNum==='undefined'||typeof addImage==='undefined')throw Error('上传组件未就绪');addImage=false;currentSortNum='1';")
+            file_input.input(str(image))
+            timeout = float((self.settings or {}).get('upload_timeout', 30))
+            deadline = time.monotonic()+max(5, min(timeout, 120))
+            while time.monotonic() < deadline:
+                self._check_stop()
+                state = read_upload_state(self.browser, platform)
+                if state['errors']:
+                    raise RuntimeError('；'.join(state['errors']))
+                if backfill_complete(before, state):
+                    self._row_log(logging.INFO, '%s图片新路径已回填、预览地址匹配；%s', label, '预览已加载' if state.get('loaded') else '预览尚未加载完成，不影响上传结果')
+                    return True
+                self._pause(.2)
+            raise TimeoutError(f'{label}图片上传超时（{timeout:g}秒）')
+        except TaskCancelled:
+            raise
+        except Exception as error:
+            logging.error('%s图片上传失败：%s', label, error)
             return False
 
     def handle_pc_options(self, option_text):
@@ -631,6 +654,6 @@ class TaskProcessor:
         self.task_runner.stop_event.set()
         self.running = False
         self.update_status("正在终止...")
-        self.browser = close_browser(self.browser, log=logging.info)
+        # The worker owns browser cleanup; do not race page operations from another thread.
 
     stop_task = request_stop

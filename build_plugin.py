@@ -13,6 +13,13 @@ PLUGIN_FILES = (
     "README.md",
     "requirements.txt",
     "main.py",
+    "main_tk.py",
+    "common/desktop_api.py",
+    "common/clipboard.py",
+    "common/execution_audit.py",
+    "common/window_style.py",
+    "common/app_paths.py",
+    "common/config_loader.py",
     "common/__init__.py",
     "common/browser.py",
     "common/config_generator.py",
@@ -25,12 +32,16 @@ PLUGIN_FILES = (
     "common/task_runner.py",
     "common/task_models.py",
     "common/task_results.py",
-    "common/result_exporter.py",
     "common/unified_settings.py",
     "deedraw/__init__.py",
-    "deedraw/credentials.py",
     "deedraw/config_adapter.py",
     "deedraw/task.py",
+    "deedraw/field_lookup.py",
+    "deedraw/page_state.py",
+    "deedraw/save_confirmation.py",
+    "deedraw/upload_state.py",
+    "deedraw/forbidden_words.py",
+    "deedraw/parallel.py",
     "deedraw/view.py",
     "pim/__init__.py",
     "pim/task.py",
@@ -40,7 +51,16 @@ PLUGIN_FILES = (
 )
 
 
+PROJECT_ROOT = Path(__file__).resolve().parent
+PLUGIN_FILES += tuple(
+    str(path.relative_to(PROJECT_ROOT)).replace("\\", "/")
+    for path in sorted((PROJECT_ROOT / "frontend" / "dist").rglob("*"))
+    if path.is_file()
+)
+
 def validate_project(project_dir: Path) -> dict:
+    if not (project_dir / "frontend/dist/index.html").is_file():
+        raise FileNotFoundError("缺少 React 构建产物，请先执行 cd frontend && npm install && npm run build")
     manifest_path = project_dir / "plugin.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     missing = [name for name in PLUGIN_FILES if not (project_dir / name).is_file()]
